@@ -224,7 +224,7 @@ func main() {
 			}
 			for _, node := range wits.Charts.PricesLastFiveMinsMap.Data.Nodes {
 				if node.Name == "Otahuhu" {
-					err := updateEntity(c, ctx, "price_now_ota", fmt.Sprintf("%0.2f", node.Price))
+					err := updateEntity(c, ctx, "price_now_ota", fmt.Sprintf("%0.2f", node.Price/1000))
 					if err != nil {
 						logError("Error notifying home assistant: ", err)
 					}
