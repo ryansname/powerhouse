@@ -10,9 +10,12 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
+
+	ble "ryansname/powerhouse/voltage-repeater/victron_ble"
 
 	"github.com/koestler/go-victron/bleparser"
-	ble "ryansname/powerhouse/voltage-repeater/victron_ble"
+	"github.com/projectdiscovery/ratelimit"
 
 	"github.com/eclipse/paho.golang/autopaho"
 	"github.com/eclipse/paho.golang/paho"
@@ -321,10 +324,16 @@ func main() {
 	}
 	defer victronBle.Shutdown()
 
+	rl1, rl2 := ratelimit.New(ctx, 1, time.Millisecond*500), ratelimit.New(ctx, 1, time.Millisecond*500)
 	for {
 		select {
 		// Batterysense
 		case d := <-bleConfig.devices[0].channel:
+			if !rl1.CanTake() {
+				continue
+			}
+			rl1.Take()
+
 			batteryRecord := d.(bleparser.BatteryMonitorRecord)
 			data := make(map[string]any)
 			data["temperature"] = batteryRecord.Temperature
@@ -333,6 +342,11 @@ func main() {
 			continue
 		// Smartsolar
 		case d := <-bleConfig.devices[1].channel:
+			if !rl2.CanTake() {
+				continue
+			}
+			rl2.Take()
+
 			chargerRecord := d.(bleparser.SolarChargerRecord)
 			data := make(map[string]any)
 			data["solar_power"] = chargerRecord.PvPower
