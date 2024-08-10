@@ -28,7 +28,7 @@ func DumpPower(detailsIn <-chan Details) {
 			details.DisableInverters(1)
 		}
 
-		sleep := time.NewTicker(time.Second * 60)
+		sleep := time.NewTicker(time.Second * 5)
 		for {
 			select {
 			case <-detailsIn:

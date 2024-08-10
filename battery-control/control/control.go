@@ -81,8 +81,10 @@ func startWebsocket(ctx context.Context, websocketOutput chan<- obj, websocketSe
 	return nil
 }
 
-const AVERAGE_SOLAR_GENERATION = "sensor.powerhouse_solar_charger_solar_power_average"
+const SOLAR_GENERATION_AVERAGE = "sensor.powerhouse_solar_charger_solar_power_average"
 const SOLAR_GENERATION = "sensor.powerhouse_solar_charger_solar_power"
+const LOAD_USAGE = "sensor.powerwall_load_now"
+const LOAD_USAGE_AVERAGE = "sensor.powerwall_load_now_average"
 const CHARGER_STATE = "sensor.powerhouse_solar_charger_charge_state"
 const CHARGER_VOLTAGE = "sensor.powerhouse_solar_charger_battery_voltage"
 
@@ -95,8 +97,9 @@ func inverterStateKey(index int) string {
 
 func sendSubscriptions(c chan<- obj) {
 	entityIds := []string{}
-	entityIds = append(entityIds, AVERAGE_SOLAR_GENERATION)
+	entityIds = append(entityIds, SOLAR_GENERATION_AVERAGE)
 	entityIds = append(entityIds, SOLAR_GENERATION)
+	entityIds = append(entityIds, LOAD_USAGE)
 	entityIds = append(entityIds, CHARGER_STATE)
 	entityIds = append(entityIds, CHARGER_VOLTAGE)
 	for i := range 9 {
@@ -161,6 +164,9 @@ func haF64(value interface{}) float64 {
 	if value == nil {
 		return -3.0
 	}
+	if f, ok := value.(float64); ok {
+		return f
+	}
 	if value == "Unavailable" {
 		return -1.0
 	}
@@ -200,7 +206,7 @@ type MapDetails struct {
 }
 
 func (d MapDetails) AverageSolarGeneration() float64 {
-	return haF64(d.state[AVERAGE_SOLAR_GENERATION])
+	return haF64(d.state[SOLAR_GENERATION_AVERAGE])
 }
 func (d MapDetails) CurrentSolarGeneration() float64 {
 	return haF64(d.state[SOLAR_GENERATION])
@@ -287,6 +293,70 @@ func (d MapDetails) DisableInverters(count int) {
 	}
 }
 
+type kv struct {
+	k string
+	v interface{}
+}
+
+type average struct {
+	inputKey         string
+	outputKey        string
+	duration         time.Duration
+	records          []float64
+	average          float64
+	idx              int
+	lastEmittedValue float64
+}
+
+func calculateAverages(mapIn <-chan map[string]interface{}) <-chan kv {
+	averages := []*average{
+		{inputKey: LOAD_USAGE, outputKey: LOAD_USAGE_AVERAGE, duration: time.Minute * 1},
+		{inputKey: SOLAR_GENERATION, outputKey: SOLAR_GENERATION_AVERAGE, duration: time.Minute * 15},
+		{inputKey: CHARGER_VOLTAGE, outputKey: CHARGER_VOLTAGE + "_1", duration: time.Minute * 1},
+	}
+	results := make(chan kv, 128)
+
+	go func() {
+		activeMap := <-mapIn
+		for _, avg := range averages {
+			recordCount := avg.duration / time.Second
+
+			avg.average = haF64(activeMap[avg.inputKey])
+			avg.records = make([]float64, recordCount)
+			for i := range avg.records {
+				avg.records[i] = avg.average
+			}
+			results <- kv{avg.outputKey, avg.average}
+			avg.lastEmittedValue = avg.average
+		}
+
+		ticker := time.NewTicker(time.Second)
+
+		for {
+			select {
+			case m := <-mapIn:
+				activeMap = m
+			case <-ticker.C:
+				for _, avg := range averages {
+					s := len(avg.records)
+					newValue := haF64(activeMap[avg.inputKey])
+					avg.average += (newValue - avg.records[avg.idx]) / float64(s)
+					avg.records[avg.idx] = newValue
+
+					avg.idx = (avg.idx + 1) % s
+
+					if avg.lastEmittedValue != avg.average {
+						results <- kv{avg.outputKey, avg.average}
+						avg.lastEmittedValue = avg.average
+					}
+				}
+			}
+		}
+	}()
+
+	return results
+}
+
 func Run() {
 	config := ini.New()
 	err := config.LoadExists("/etc/battery-control.ini", "battery-control.ini")
@@ -309,6 +379,10 @@ func Run() {
 
 	detailsChan := make(chan Details)
 	state := map[string]interface{}{}
+
+	stateChan := make(chan map[string]interface{}, 128)
+	averagesChan := calculateAverages(stateChan)
+
 	go DumpPower(detailsChan)
 	for {
 		select {
@@ -320,11 +394,13 @@ func Run() {
 				event := msg["event"].(obj)
 				// fmt.Println("Event:", event)
 				updateState(event, state)
-				details := MapDetails{
-					maps.Clone(state),
+				stateRead := maps.Clone(state)
+				stateChan <- stateRead
+				detailsChan <- MapDetails{
+					stateRead,
 					sendChan,
 				}
-				detailsChan <- details
+
 			} else if msg["type"] == "result" {
 				if !haBool(msg["success"], false) {
 					fmt.Println("Got failure result:", msg)
@@ -332,6 +408,15 @@ func Run() {
 			} else {
 				fmt.Println("Unknown message: ", msg)
 			}
+		case average := <-averagesChan:
+			// fmt.Println(average)
+			state[average.k] = average.v
+			stateRead := maps.Clone(state)
+			detailsChan <- MapDetails{
+				stateRead,
+				sendChan,
+			}
+			break
 		}
 	}
 }
