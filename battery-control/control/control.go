@@ -81,6 +81,7 @@ func startWebsocket(ctx context.Context, websocketOutput chan<- obj, websocketSe
 	return nil
 }
 
+const POWERHOUSE_CONTROL_MANUAL = "input_boolean.powerhouse_control_manual"
 const SOLAR_GENERATION_AVERAGE = "sensor.powerhouse_solar_charger_solar_power_average"
 const SOLAR_GENERATION = "sensor.powerhouse_solar_charger_solar_power"
 const LOAD_USAGE = "sensor.powerwall_load_now"
@@ -97,6 +98,7 @@ func inverterStateKey(index int) string {
 
 func sendSubscriptions(c chan<- obj) {
 	entityIds := []string{}
+	entityIds = append(entityIds, POWERHOUSE_CONTROL_MANUAL)
 	entityIds = append(entityIds, SOLAR_GENERATION_AVERAGE)
 	entityIds = append(entityIds, SOLAR_GENERATION)
 	entityIds = append(entityIds, LOAD_USAGE)
@@ -396,9 +398,12 @@ func Run() {
 				updateState(event, state)
 				stateRead := maps.Clone(state)
 				stateChan <- stateRead
-				detailsChan <- MapDetails{
-					stateRead,
-					sendChan,
+
+				if !haBool(state[POWERHOUSE_CONTROL_MANUAL], false) {
+					detailsChan <- MapDetails{
+						stateRead,
+						sendChan,
+					}
 				}
 
 			} else if msg["type"] == "result" {
@@ -412,11 +417,13 @@ func Run() {
 			// fmt.Println(average)
 			state[average.k] = average.v
 			stateRead := maps.Clone(state)
-			detailsChan <- MapDetails{
-				stateRead,
-				sendChan,
+			if !haBool(state[POWERHOUSE_CONTROL_MANUAL], false) {
+				detailsChan <- MapDetails{
+					stateRead,
+					sendChan,
+				}
+				break
 			}
-			break
 		}
 	}
 }
