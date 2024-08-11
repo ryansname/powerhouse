@@ -1,4 +1,4 @@
-module github.com/ryansname/powerhouse
+module github.com/ryansname/powerhouse/battery-control
 
 go 1.22.5
 
