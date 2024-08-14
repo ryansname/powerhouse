@@ -62,7 +62,7 @@ func startWebsocket(ctx context.Context, websocketOutput chan<- obj, websocketSe
 			select {
 			case <-socketContext.Done():
 			case msg := <-websocketSend:
-				fmt.Println("Sending", msg)
+				// fmt.Println("Sending", msg)
 				if msg["type"] != "auth" {
 					msg["id"] = nextId
 					nextId += 1
@@ -81,11 +81,13 @@ func startWebsocket(ctx context.Context, websocketOutput chan<- obj, websocketSe
 	return nil
 }
 
+const UNAVAILABLE = "unavailable"
+const POWERHOUSE_DEBUG_STRING = "input_text.powerhouse_control_debug"
 const POWERHOUSE_CONTROL_MANUAL = "input_boolean.powerhouse_control_manual"
 const SOLAR_GENERATION_AVERAGE = "sensor.powerhouse_solar_charger_solar_power_average"
 const SOLAR_GENERATION = "sensor.powerhouse_solar_charger_solar_power"
-const LOAD_USAGE = "sensor.powerwall_load_now"
-const LOAD_USAGE_AVERAGE = "sensor.powerwall_load_now_average"
+const LOAD_POWER = "sensor.powerwall_load_now"
+const LOAD_POWER_AVERAGE = "sensor.powerwall_load_now_average"
 const CHARGER_STATE = "sensor.powerhouse_solar_charger_charge_state"
 const CHARGER_VOLTAGE = "sensor.powerhouse_solar_charger_battery_voltage"
 
@@ -101,7 +103,7 @@ func sendSubscriptions(c chan<- obj) {
 	entityIds = append(entityIds, POWERHOUSE_CONTROL_MANUAL)
 	entityIds = append(entityIds, SOLAR_GENERATION_AVERAGE)
 	entityIds = append(entityIds, SOLAR_GENERATION)
-	entityIds = append(entityIds, LOAD_USAGE)
+	entityIds = append(entityIds, LOAD_POWER)
 	entityIds = append(entityIds, CHARGER_STATE)
 	entityIds = append(entityIds, CHARGER_VOLTAGE)
 	for i := range 9 {
@@ -128,6 +130,16 @@ func updateState(event obj, state map[string]interface{}) {
 			}
 		}
 	}
+}
+
+func isValid(state map[string]interface{}) bool {
+	for k, v := range state {
+		if v == nil || v == UNAVAILABLE {
+			fmt.Printf("%s is %v\n", k, v)
+			return false
+		}
+	}
+	return true
 }
 
 func nextId(state map[string]interface{}) (id int) {
@@ -207,17 +219,26 @@ type MapDetails struct {
 	sendChan chan<- obj
 }
 
+func (d MapDetails) ChargerState() string {
+	return d.state[CHARGER_STATE].(string)
+}
 func (d MapDetails) AverageSolarGeneration() float64 {
 	return haF64(d.state[SOLAR_GENERATION_AVERAGE])
 }
 func (d MapDetails) CurrentSolarGeneration() float64 {
 	return haF64(d.state[SOLAR_GENERATION])
 }
+func (d MapDetails) AverageLoadPower() float64 {
+	return haF64(d.state[LOAD_POWER_AVERAGE]) * 1000
+}
+func (d MapDetails) CurrentLoadPower() float64 {
+	return haF64(d.state[LOAD_POWER]) * 1000
+}
 func (d MapDetails) PowerPerInverter() float64 {
 	return 250
 }
-func (d MapDetails) ExpectedInvertingPower() float64 {
-	count := 0.0
+func (d MapDetails) EnabledInverters() int64 {
+	count := int64(0)
 	for i := range 9 {
 		if haF64(d.state[inverterPowerKey(i)]) < 0 {
 			count += 1
@@ -225,10 +246,40 @@ func (d MapDetails) ExpectedInvertingPower() float64 {
 			count += 1
 		}
 	}
-	return count * d.PowerPerInverter()
+	return count
 }
 
-func (d MapDetails) EnableInverters(count int) {
+func (d MapDetails) SetDebug(debug string) {
+	msg := obj{
+		"type":    "call_service",
+		"domain":  "input_text",
+		"service": "set_value",
+		"target": obj{
+			"entity_id": []string{POWERHOUSE_DEBUG_STRING},
+		},
+		"service_data": obj{
+			"value": debug,
+		},
+	}
+	d.sendChan <- msg
+}
+
+func (d MapDetails) SetInverterCount(count int64) {
+	dInverters := count - d.EnabledInverters()
+	if dInverters == 0 {
+		return
+	}
+
+	enable := dInverters > 0
+	fmt.Printf("Enable: %v, dInverters: %v\n", enable, dInverters)
+	if enable {
+		d.EnableInverters(int64(dInverters))
+	} else {
+		d.DisableInverters(int64(-dInverters))
+	}
+}
+
+func (d MapDetails) EnableInverters(count int64) {
 	invertersPoweredOff := make([]int, 0)
 	for i := range 9 {
 		if !haBool(d.state[inverterStateKey(i)], true) {
@@ -256,7 +307,7 @@ func (d MapDetails) EnableInverters(count int) {
 		invertersPoweredOff = invertersPoweredOff[:len(invertersPoweredOff)-1]
 	}
 }
-func (d MapDetails) DisableInverters(count int) {
+func (d MapDetails) DisableInverters(count int64) {
 	invertersGenerating := make([]int, 0)
 	invertersPoweredIdle := make([]int, 0)
 
@@ -312,11 +363,17 @@ type average struct {
 
 func calculateAverages(mapIn <-chan map[string]interface{}) <-chan kv {
 	averages := []*average{
-		{inputKey: LOAD_USAGE, outputKey: LOAD_USAGE_AVERAGE, duration: time.Minute * 1},
+		{inputKey: LOAD_POWER, outputKey: LOAD_POWER_AVERAGE, duration: time.Minute * 5},
 		{inputKey: SOLAR_GENERATION, outputKey: SOLAR_GENERATION_AVERAGE, duration: time.Minute * 15},
 		{inputKey: CHARGER_VOLTAGE, outputKey: CHARGER_VOLTAGE + "_1", duration: time.Minute * 1},
 	}
 	results := make(chan kv, 128)
+	if len(averages) >= cap(results) {
+		panic("Too many averages")
+	}
+	for _, avg := range averages {
+		results <- kv{avg.outputKey, UNAVAILABLE}
+	}
 
 	go func() {
 		activeMap := <-mapIn
@@ -382,10 +439,11 @@ func Run() {
 	detailsChan := make(chan Details)
 	state := map[string]interface{}{}
 
-	stateChan := make(chan map[string]interface{}, 128)
-	averagesChan := calculateAverages(stateChan)
+	averagesInChan := make(chan map[string]interface{}, 128)
+	averagesChan := calculateAverages(averagesInChan)
 
-	go DumpPower(detailsChan)
+	// go DumpPower(detailsChan)
+	go SelfSufficient(detailsChan)
 	for {
 		select {
 		case msg := <-recvChan:
@@ -396,9 +454,13 @@ func Run() {
 				event := msg["event"].(obj)
 				// fmt.Println("Event:", event)
 				updateState(event, state)
-				stateRead := maps.Clone(state)
-				stateChan <- stateRead
 
+				stateRead := maps.Clone(state)
+				averagesInChan <- stateRead
+
+				if !isValid(state) {
+					break
+				}
 				if !haBool(state[POWERHOUSE_CONTROL_MANUAL], false) {
 					detailsChan <- MapDetails{
 						stateRead,
@@ -416,6 +478,10 @@ func Run() {
 		case average := <-averagesChan:
 			// fmt.Println(average)
 			state[average.k] = average.v
+			if !isValid(state) {
+				break
+			}
+
 			stateRead := maps.Clone(state)
 			if !haBool(state[POWERHOUSE_CONTROL_MANUAL], false) {
 				detailsChan <- MapDetails{
