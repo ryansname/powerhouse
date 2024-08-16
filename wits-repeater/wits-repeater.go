@@ -21,23 +21,12 @@ const deviceId = "wits-repeater"
 var msgId uint16 = 0
 
 type ResponseJson struct {
-	Charts struct {
-		PricesLastFiveMinsMap struct {
-			Key  string `json:"key"`
-			Data struct {
-				Nodes []struct {
-					Name          string  `json:"name"`
-					TradingDate   string  `json:"trading_date"`
-					TradingPeriod int     `json:"trading_period"`
-					RunType       string  `json:"run_type"`
-					GipGxpFull    string  `json:"gip_gxp_full"`
-					Price         float64 `json:"price"`
-					RunTime       string  `json:"run_time"`
-					MarketTime    string  `json:"market_time"`
-				}
-			} `json:"data"`
-		} `json:"prices_last_five_mins_map"`
-	} `json:"charts"`
+	Content struct {
+		Items []struct {
+			GridPoint string  `json:"gip_gxp_full"`
+			Price     float64 `json:"price"`
+		} `json:"items"`
+	} `json:"content"`
 }
 
 func makeClientConfig() (*autopaho.ClientConfig, error) {
@@ -173,12 +162,10 @@ func fetchWitsInfo() (*ResponseJson, error) {
 	client := resty.New()
 
 	resp, err := client.R().
-		SetQueryParams(map[string]string{
-			"chart_keys": "prices_last_five_mins_map",
-		}).
+		SetQueryParams(map[string]string{}).
 		SetResult(ResponseJson{}).
 		EnableTrace().
-		Get("https://www2.electricityinfo.co.nz/dashboard/updates")
+		Get("https://www2.electricityinfo.co.nz/api/v1/dashboard/price_map")
 
 	if err != nil {
 		return nil, err
@@ -216,22 +203,26 @@ func main() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
+		wits, err := fetchWitsInfo()
+		if err != nil {
+			logError("Error fetching info: ", err)
+			continue
+		}
+
+		price := 0.0
+		for _, node := range wits.Content.Items {
+			if node.GridPoint == "OTA2201" {
+				price = node.Price
+			}
+		}
+		err = updateEntity(c, ctx, "price_now_ota", fmt.Sprintf("%0.2f", price/1000))
+		if err != nil {
+			logError("Error notifying home assistant: ", err)
+			continue
+		}
+
 		select {
 		case <-ticker.C:
-			wits, err := fetchWitsInfo()
-			if err != nil {
-				logError("Error fetching info: ", err)
-				continue
-			}
-			for _, node := range wits.Charts.PricesLastFiveMinsMap.Data.Nodes {
-				if node.Name == "Otahuhu" {
-					err := updateEntity(c, ctx, "price_now_ota", fmt.Sprintf("%0.2f", node.Price/1000))
-					if err != nil {
-						logError("Error notifying home assistant: ", err)
-						continue
-					}
-				}
-			}
 			continue
 		case <-ctx.Done():
 		}
