@@ -15,7 +15,6 @@ import (
 	ble "ryansname/powerhouse/voltage-repeater/victron_ble"
 
 	"github.com/koestler/go-victron/bleparser"
-	"github.com/projectdiscovery/ratelimit"
 
 	"github.com/eclipse/paho.golang/autopaho"
 	"github.com/eclipse/paho.golang/paho"
@@ -99,7 +98,7 @@ func macToTopic(mac string) string {
 }
 
 func createEnumEntity(client *autopaho.ConnectionManager, ctx context.Context, entityName, entityClass, entityMeasure, deviceName, deviceMac, deviceModel, jsonKey, stateClass string, options []string) error {
-	err := createEntity(client, ctx, entityName, entityClass, entityMeasure, deviceName, deviceMac, deviceModel, jsonKey, stateClass)
+	err := createEntity(client, ctx, entityName, entityClass, entityMeasure, deviceName, deviceMac, deviceModel, jsonKey, stateClass, 0)
 	if err != nil {
 		return err
 	}
@@ -108,17 +107,23 @@ func createEnumEntity(client *autopaho.ConnectionManager, ctx context.Context, e
 	return nil
 }
 
-func createEntity(client *autopaho.ConnectionManager, ctx context.Context, entityName, entityClass, entityMeasure, deviceName, deviceMac, deviceModel, jsonKey, stateClass string) error {
+func createEntity(
+	client *autopaho.ConnectionManager,
+	ctx context.Context,
+	entityName, entityClass, entityMeasure, deviceName, deviceMac, deviceModel, jsonKey, stateClass string,
+	displayPrecision int,
+) error {
 	type Config struct {
-		Name          string `json:"name,omitempty"`
-		DeviceClass   string `json:"device_class"`
-		StateTopic    string `json:"state_topic"`
-		UnitOfMeasure string `json:"unit_of_measurement,omitempty"`
-		ValueTemplate string `json:"value_template"`
-		UniqueId      string `json:"unique_id"`
-		ExpireAfter   uint   `json:"expire_after,omitempty"`
-		StateClass    string `json:"state_class,omitempty"`
-		Device        struct {
+		Name             string `json:"name,omitempty"`
+		DeviceClass      string `json:"device_class"`
+		StateTopic       string `json:"state_topic"`
+		UnitOfMeasure    string `json:"unit_of_measurement,omitempty"`
+		ValueTemplate    string `json:"value_template"`
+		UniqueId         string `json:"unique_id"`
+		ExpireAfter      uint   `json:"expire_after,omitempty"`
+		StateClass       string `json:"state_class,omitempty"`
+		DisplayPrecision int    `json:"suggested_display_precision,omitempty"`
+		Device           struct {
 			Identifiers  []string `json:"identifiers"`
 			Name         string   `json:"name"`
 			Manufacturer string   `json:"manufacturer,omitempty"`
@@ -128,12 +133,13 @@ func createEntity(client *autopaho.ConnectionManager, ctx context.Context, entit
 	config := Config{}
 	config.Name = entityName
 	config.DeviceClass = entityClass
-	config.StateTopic = "homeassistant/sensor/" + macToTopic(deviceMac) + "/state"
+	config.StateTopic = "voltagerepeater/sensor/" + macToTopic(deviceMac) + "/state"
 	config.UnitOfMeasure = entityMeasure
 	config.ValueTemplate = "{{ value_json." + jsonKey + "}}"
-	config.UniqueId = deviceName + " " + entityName
+	config.UniqueId = deviceMac + " " + entityName
 	config.ExpireAfter = 60 * 2
 	config.StateClass = stateClass
+	config.DisplayPrecision = displayPrecision
 	config.Device.Identifiers = []string{deviceMac, deviceName}
 	config.Device.Name = deviceName
 	config.Device.Manufacturer = "Victron"
@@ -166,7 +172,7 @@ func updateEntity(client *autopaho.ConnectionManager, ctx context.Context, devic
 	publish := paho.Publish{}
 	publish.PacketID = msgId
 	publish.QoS = 2
-	publish.Topic = "homeassistant/sensor/" + macToTopic(deviceMac) + "/state"
+	publish.Topic = "voltagerepeater/sensor/" + macToTopic(deviceMac) + "/state"
 	publish.Payload = []byte(payloadString)
 
 	client.Publish(ctx, &publish)
@@ -177,47 +183,51 @@ func logError(msg string, err error) {
 	fmt.Fprint(os.Stderr, msg, err)
 }
 
-func setupHomeAssistant(client *autopaho.ConnectionManager, ctx context.Context, config *ini.Ini) error {
-	err := createEntity(client, ctx, "Voltage", "voltage", "V", "Powerhouse Battery", config.String("batterysense.mac"), "Smart Battery Sense", "voltage", "measurement")
+func setupHomeAssistant(client *autopaho.ConnectionManager, ctx context.Context, config *ini.Ini, bleConfig *BleConfig) error {
+	err := createEntity(client, ctx, "Voltage", "voltage", "V", "Powerhouse Battery", config.String("batterysense.mac"), "Smart Battery Sense", "voltage", "measurement", 2)
 	if err != nil {
 		panic(err)
 	}
 
-	err = createEntity(client, ctx, "Temperature", "temperature", "°C", "Powerhouse Battery", config.String("batterysense.mac"), "Smart Battery Sense", "temperature", "measurement")
+	err = createEntity(client, ctx, "Temperature", "temperature", "°C", "Powerhouse Battery", config.String("batterysense.mac"), "Smart Battery Sense", "temperature", "measurement", 2)
 	if err != nil {
 		panic(err)
 	}
 
-	err = createEntity(client, ctx, "Solar Power", "power", "W", "Powerhouse Solar Charger", config.String("smartsolar.mac"), "SmartSolar 150/45", "solar_power", "measurement")
-	if err != nil {
-		panic(err)
-	}
+	for _, dev := range bleConfig.devices[1:] {
+		err = createEntity(client, ctx, "Solar Power", "power", "W", dev.name, dev.mac, dev.model, "solar_power", "measurement", 0)
+		if err != nil {
+			panic(err)
+		}
 
-	err = createEntity(client, ctx, "Solar Energy", "energy", "Wh", "Powerhouse Solar Charger", config.String("smartsolar.mac"), "SmartSolar 150/45", "energy_today", "total_increasing")
-	if err != nil {
-		panic(err)
-	}
+		err = createEntity(client, ctx, "Solar Energy", "energy", "Wh", dev.name, dev.mac, dev.model, "energy_today", "total_increasing", 0)
+		if err != nil {
+			panic(err)
+		}
 
-	err = createEnumEntity(client, ctx, "Charge State", "enum", "", "Powerhouse Solar Charger", config.String("smartsolar.mac"), "SmartSolar 150/45", "charge_state", "", smartsolarStates[:])
-	if err != nil {
-		panic(err)
-	}
+		err = createEnumEntity(client, ctx, "Charge State", "enum", "", dev.name, dev.mac, dev.model, "charge_state", "", smartsolarStates[:])
+		if err != nil {
+			panic(err)
+		}
 
-	err = createEntity(client, ctx, "Battery Voltage", "voltage", "V", "Powerhouse Solar Charger", config.String("smartsolar.mac"), "SmartSolar 150/45", "battery_voltage", "measurement")
-	if err != nil {
-		panic(err)
-	}
+		err = createEntity(client, ctx, "Battery Voltage", "voltage", "V", dev.name, dev.mac, dev.model, "battery_voltage", "measurement", 2)
+		if err != nil {
+			panic(err)
+		}
 
-	err = createEntity(client, ctx, "Battery Current", "current", "A", "Powerhouse Solar Charger", config.String("smartsolar.mac"), "SmartSolar 150/45", "battery_current", "measurement")
-	if err != nil {
-		panic(err)
+		err = createEntity(client, ctx, "Battery Current", "current", "A", dev.name, dev.mac, dev.model, "battery_current", "measurement", 2)
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	return nil
 }
 
 type BleDevice struct {
+	id      string
 	name    string
+	model   string
 	mac     string
 	key     []byte
 	channel chan interface{}
@@ -243,26 +253,28 @@ type BleConfig struct {
 
 func ConvertToBleConfig(config *ini.Ini) (*BleConfig, error) {
 	devices := make([]BleDevice, 0)
-	deviceNames := [...]string{"batterysense", "smartsolar"}
+	deviceIds := [...]string{"batterysense", "solar3", "solar4", "solar5"}
 
-	for _, deviceName := range deviceNames {
-		keyString := config.String(deviceName + ".key")
+	for _, deviceId := range deviceIds {
+		keyString := config.String(deviceId + ".key")
 		keyBytes, err := hex.DecodeString(keyString)
 		if err != nil {
 			return nil, err
 		}
 
 		device := BleDevice{
-			deviceName,
-			config.String(deviceName + ".mac"),
+			deviceId,
+			config.String(deviceId + ".name"),
+			config.String(deviceId + ".device"),
+			config.String(deviceId + ".mac"),
 			keyBytes,
-			make(chan interface{}),
+			make(chan interface{}, 32),
 		}
 		if device.mac == "" {
-			return nil, fmt.Errorf("Device %s has no value for 'mac', expected device mac address", deviceName)
+			return nil, fmt.Errorf("Device %s has no value for 'mac', expected device mac address", deviceId)
 		}
 		if len(device.key) == 0 {
-			return nil, fmt.Errorf("Device %s has no value for 'mac', expected device mac address", deviceName)
+			return nil, fmt.Errorf("Device %s has no value for 'mac', expected device mac address", deviceId)
 		}
 		devices = append(devices, device)
 	}
@@ -311,12 +323,12 @@ func main() {
 		panic(err)
 	}
 
-	setupHomeAssistant(c, ctx, config)
-
 	bleConfig, err := ConvertToBleConfig(config)
 	if err != nil {
 		panic(err)
 	}
+
+	setupHomeAssistant(c, ctx, config, bleConfig)
 
 	victronBle, err := ble.New(bleConfig)
 	if err != nil {
@@ -324,41 +336,48 @@ func main() {
 	}
 	defer victronBle.Shutdown()
 
-	rl1, rl2 := ratelimit.New(ctx, 1, time.Millisecond*500), ratelimit.New(ctx, 1, time.Millisecond*500)
+	ticker := time.NewTicker(time.Second)
+outer:
 	for {
 		select {
-		// Batterysense
-		case d := <-bleConfig.devices[0].channel:
-			if !rl1.CanTake() {
-				continue
-			}
-			rl1.Take()
-
-			batteryRecord := d.(bleparser.BatteryMonitorRecord)
-			data := make(map[string]any)
-			data["temperature"] = batteryRecord.Temperature
-			data["voltage"] = batteryRecord.BatteryVoltage
-			updateEntity(c, ctx, bleConfig.devices[0].mac, data)
-			continue
-		// Smartsolar
-		case d := <-bleConfig.devices[1].channel:
-			if !rl2.CanTake() {
-				continue
-			}
-			rl2.Take()
-
-			chargerRecord := d.(bleparser.SolarChargerRecord)
-			data := make(map[string]any)
-			data["solar_power"] = chargerRecord.PvPower
-			data["energy_today"] = chargerRecord.YieldToday
-			data["charge_state"] = chargerRecord.DeviceState.String()
-			data["battery_voltage"] = chargerRecord.BatteryVoltage
-			data["battery_current"] = chargerRecord.BatteryCurrent
-			updateEntity(c, ctx, bleConfig.devices[1].mac, data)
-			continue
 		case <-ctx.Done():
+			break outer
+		case <-ticker.C:
 		}
-		break
+
+		for _, dev := range bleConfig.devices {
+			var msg interface{}
+		inner:
+			for {
+				select {
+				case msg = <-dev.channel:
+					// Got a message, process it
+				default:
+					// Try the next device
+					break inner
+				}
+			}
+
+			if msg == nil {
+				continue
+			}
+
+			switch m := msg.(type) {
+			case bleparser.BatteryMonitorRecord:
+				data := make(map[string]any)
+				data["temperature"] = m.Temperature
+				data["voltage"] = m.BatteryVoltage
+				updateEntity(c, ctx, dev.mac, data)
+			case bleparser.SolarChargerRecord:
+				data := make(map[string]any)
+				data["solar_power"] = m.PvPower
+				data["energy_today"] = m.YieldToday
+				data["charge_state"] = m.DeviceState.String()
+				data["battery_voltage"] = m.BatteryVoltage
+				data["battery_current"] = m.BatteryCurrent
+				updateEntity(c, ctx, dev.mac, data)
+			}
+		}
 	}
 
 	stop()
