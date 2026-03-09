@@ -36,10 +36,9 @@ var smartsolarStates = [...]string{
 
 var msgId uint16 = 0
 
-func makeClientConfig(config *ini.Ini) (*autopaho.ClientConfig, error) {
+func makeClientConfig(config *ini.Ini, bleConfig *BleConfig, haOnline chan<- struct{}) (*autopaho.ClientConfig, error) {
 	clientID := "voltage-repeater"
 
-	// We will connect to the Eclipse test server (note that you may see messages that other users publish)
 	rawHost := config.String("mqtt.host")
 	u, err := url.Parse("mqtt://" + rawHost + ":1883")
 	if err != nil {
@@ -48,36 +47,41 @@ func makeClientConfig(config *ini.Ini) (*autopaho.ClientConfig, error) {
 	fmt.Println(u)
 
 	cliCfg := autopaho.ClientConfig{
-		ServerUrls:      []*url.URL{u},
-		ConnectUsername: config.String("mqtt.username"),
-		ConnectPassword: []byte(config.String("mqtt.password")),
-		KeepAlive:       20, // Keepalive message should be sent every 20 seconds
-		// CleanStartOnInitialConnection defaults to false. Setting this to true will clear the session on the first connection.
+		ServerUrls:                    []*url.URL{u},
+		ConnectUsername:               config.String("mqtt.username"),
+		ConnectPassword:               []byte(config.String("mqtt.password")),
+		KeepAlive:                     20,
 		CleanStartOnInitialConnection: true,
 		SessionExpiryInterval:         60,
 		OnConnectionUp: func(cm *autopaho.ConnectionManager, connAck *paho.Connack) {
 			fmt.Println("mqtt connection up")
-			// Subscribing in the OnConnectionUp callback is recommended (ensures the subscription is reestablished if
-			// the connection drops)
-			if _, err := cm.Subscribe(context.Background(), &paho.Subscribe{
+			ctx := context.Background()
+			if _, err := cm.Subscribe(ctx, &paho.Subscribe{
 				Subscriptions: []paho.SubscribeOptions{
-					{Topic: "potato", QoS: 1},
+					{Topic: "homeassistant/status", QoS: 1},
 				},
 			}); err != nil {
-				fmt.Printf("failed to subscribe (%s). This is likely to mean no messages will be received.", err)
+				fmt.Printf("failed to subscribe to homeassistant/status: %s\n", err)
 			}
-			fmt.Println("mqtt subscription made")
+			fmt.Println("re-registering HA entities")
+			if err := setupHomeAssistant(cm, ctx, config, bleConfig); err != nil {
+				fmt.Printf("failed to setup HA entities: %s\n", err)
+			}
 		},
 		OnConnectError: func(err error) { fmt.Printf("error whilst attempting connection: %s\n", err) },
-		// eclipse/paho.golang/paho provides base mqtt functionality, the below config will be passed in for each connection
 		ClientConfig: paho.ClientConfig{
-			// If you are using QOS 1/2, then it's important to specify a client id (which must be unique)
 			ClientID: clientID,
-			// OnPublishReceived is a slice of functions that will be called when a message is received.
-			// You can write the function(s) yourself or use the supplied Router
 			OnPublishReceived: []func(paho.PublishReceived) (bool, error){
 				func(pr paho.PublishReceived) (bool, error) {
-					fmt.Printf("received message on topic %s; body: %s (retain: %t)\n", pr.Packet.Topic, pr.Packet.Payload, pr.Packet.Retain)
+					if pr.Packet.Topic == "homeassistant/status" {
+						fmt.Printf("home assistant status: %s (retain: %t)\n", pr.Packet.Payload, pr.Packet.Retain)
+						if string(pr.Packet.Payload) == "online" && !pr.Packet.Retain {
+							select {
+							case haOnline <- struct{}{}:
+							default:
+							}
+						}
+					}
 					return true, nil
 				}},
 			OnClientError: func(err error) { fmt.Printf("client error: %s\n", err) },
@@ -149,6 +153,7 @@ func createEntity(
 	publish := paho.Publish{}
 	publish.PacketID = msgId
 	publish.QoS = 2
+	publish.Retain = true
 	publish.Topic = "homeassistant/sensor/" + macToTopic(deviceMac) + "-" + jsonKey + "/config"
 
 	payloadString, err := json.Marshal(config)
@@ -184,40 +189,33 @@ func logError(msg string, err error) {
 }
 
 func setupHomeAssistant(client *autopaho.ConnectionManager, ctx context.Context, config *ini.Ini, bleConfig *BleConfig) error {
-	err := createEntity(client, ctx, "Voltage", "voltage", "V", "Powerhouse Battery", config.String("batterysense.mac"), "Smart Battery Sense", "voltage", "measurement", 2)
-	if err != nil {
-		panic(err)
+	if err := createEntity(client, ctx, "Voltage", "voltage", "V", "Powerhouse Battery", config.String("batterysense.mac"), "Smart Battery Sense", "voltage", "measurement", 2); err != nil {
+		return err
 	}
 
-	err = createEntity(client, ctx, "Temperature", "temperature", "°C", "Powerhouse Battery", config.String("batterysense.mac"), "Smart Battery Sense", "temperature", "measurement", 2)
-	if err != nil {
-		panic(err)
+	if err := createEntity(client, ctx, "Temperature", "temperature", "°C", "Powerhouse Battery", config.String("batterysense.mac"), "Smart Battery Sense", "temperature", "measurement", 2); err != nil {
+		return err
 	}
 
 	for _, dev := range bleConfig.devices[1:] {
-		err = createEntity(client, ctx, "Solar Power", "power", "W", dev.name, dev.mac, dev.model, "solar_power", "measurement", 0)
-		if err != nil {
-			panic(err)
+		if err := createEntity(client, ctx, "Solar Power", "power", "W", dev.name, dev.mac, dev.model, "solar_power", "measurement", 0); err != nil {
+			return err
 		}
 
-		err = createEntity(client, ctx, "Solar Energy", "energy", "Wh", dev.name, dev.mac, dev.model, "energy_today", "total_increasing", 0)
-		if err != nil {
-			panic(err)
+		if err := createEntity(client, ctx, "Solar Energy", "energy", "Wh", dev.name, dev.mac, dev.model, "energy_today", "total_increasing", 0); err != nil {
+			return err
 		}
 
-		err = createEnumEntity(client, ctx, "Charge State", "enum", "", dev.name, dev.mac, dev.model, "charge_state", "", smartsolarStates[:])
-		if err != nil {
-			panic(err)
+		if err := createEnumEntity(client, ctx, "Charge State", "enum", "", dev.name, dev.mac, dev.model, "charge_state", "", smartsolarStates[:]); err != nil {
+			return err
 		}
 
-		err = createEntity(client, ctx, "Battery Voltage", "voltage", "V", dev.name, dev.mac, dev.model, "battery_voltage", "measurement", 2)
-		if err != nil {
-			panic(err)
+		if err := createEntity(client, ctx, "Battery Voltage", "voltage", "V", dev.name, dev.mac, dev.model, "battery_voltage", "measurement", 2); err != nil {
+			return err
 		}
 
-		err = createEntity(client, ctx, "Battery Current", "current", "A", dev.name, dev.mac, dev.model, "battery_current", "measurement", 2)
-		if err != nil {
-			panic(err)
+		if err := createEntity(client, ctx, "Battery Current", "current", "A", dev.name, dev.mac, dev.model, "battery_current", "measurement", 2); err != nil {
+			return err
 		}
 	}
 
@@ -309,7 +307,14 @@ func main() {
 		panic(err)
 	}
 
-	clientConfig, err := makeClientConfig(config)
+	bleConfig, err := ConvertToBleConfig(config)
+	if err != nil {
+		panic(err)
+	}
+
+	haOnline := make(chan struct{}, 1)
+
+	clientConfig, err := makeClientConfig(config, bleConfig, haOnline)
 	if err != nil {
 		panic(err)
 	}
@@ -323,13 +328,6 @@ func main() {
 		panic(err)
 	}
 
-	bleConfig, err := ConvertToBleConfig(config)
-	if err != nil {
-		panic(err)
-	}
-
-	setupHomeAssistant(c, ctx, config, bleConfig)
-
 	victronBle, err := ble.New(bleConfig)
 	if err != nil {
 		panic(err)
@@ -342,6 +340,12 @@ outer:
 		select {
 		case <-ctx.Done():
 			break outer
+		case <-haOnline:
+			fmt.Println("Home Assistant restarted, re-registering entities")
+			if err := setupHomeAssistant(c, ctx, config, bleConfig); err != nil {
+				fmt.Printf("failed to re-register HA entities: %s\n", err)
+			}
+			continue
 		case <-ticker.C:
 		}
 
