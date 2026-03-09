@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,8 +21,7 @@ import (
 	"github.com/gookit/ini/v2"
 )
 
-//go:embed VERSION
-var version string
+var version = "dev"
 
 var smartsolarStates = [...]string{
 	"Not charging",
