@@ -79,7 +79,7 @@ func makeClientConfig() (*autopaho.ClientConfig, error) {
 					fmt.Printf("received message on topic %s; body: %s (retain: %t)\n", pr.Packet.Topic, pr.Packet.Payload, pr.Packet.Retain)
 					return true, nil
 				}},
-			OnClientError: func(err error) { fmt.Printf("client error: %s\n", err) },
+			OnClientError: func(err error) { fmt.Printf("mqtt: client error: %s\n", err) },
 			OnServerDisconnect: func(d *paho.Disconnect) {
 				if d.Properties != nil {
 					fmt.Printf("server requested disconnect: %s\n", d.Properties.ReasonString)
@@ -165,7 +165,15 @@ func fetchWitsInfo() (*ResponseJson, error) {
 		SetQueryParams(map[string]string{}).
 		SetResult(ResponseJson{}).
 		EnableTrace().
-		Get("https://www2.electricityinfo.co.nz/api/v1/dashboard/price_map")
+		Get("https://www1.electricityinfo.co.nz/api/v1/dashboard/price_map")
+
+	if err != nil {
+		resp, err = client.R().
+			SetQueryParams(map[string]string{}).
+			SetResult(ResponseJson{}).
+			EnableTrace().
+			Get("https://www2.electricityinfo.co.nz/api/v1/dashboard/price_map")
+	}
 
 	if err != nil {
 		return nil, err
