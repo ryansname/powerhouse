@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,6 +21,9 @@ import (
 	"github.com/eclipse/paho.golang/paho"
 	"github.com/gookit/ini/v2"
 )
+
+//go:embed VERSION
+var version string
 
 var smartsolarStates = [...]string{
 	"Not charging",
@@ -298,6 +302,8 @@ func (b BleConfig) Devices() []ble.DeviceConfig {
 }
 
 func main() {
+	fmt.Printf("voltage-repeater %s\n", strings.TrimSpace(version))
+
 	// App will run until cancelled by user (e.g. ctrl-c)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
