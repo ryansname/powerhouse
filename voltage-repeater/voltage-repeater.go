@@ -21,8 +21,6 @@ import (
 	"github.com/gookit/ini/v2"
 )
 
-var version = "dev"
-
 var smartsolarStates = [...]string{
 	"Not charging",
 	"Fault",
@@ -300,8 +298,6 @@ func (b BleConfig) Devices() []ble.DeviceConfig {
 }
 
 func main() {
-	fmt.Printf("voltage-repeater %s\n", strings.TrimSpace(version))
-
 	// App will run until cancelled by user (e.g. ctrl-c)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
